@@ -14,7 +14,8 @@ from pydantic_settings import BaseSettings
 from .schemas import (
     Brain, BrainStats, QuizSubmission, QuizResult,
     TwinRequest, TwinResponse, ResonanceRequest, ResonanceResult,
-    HealthResponse, ErrorResponse, TwinType
+    HealthResponse, ErrorResponse, TwinType, TwinMode,
+    CouncilResponse, DebateResponse, RelayResponse, TwinHistory
 )
 from .quiz import get_questions, process_quiz, create_brain_from_result, ARCHETYPES
 from .twins import get_twin_engine
@@ -256,8 +257,81 @@ async def list_twins():
                 "name": "Mirror",
                 "description": "Reflects, questions, reveals blind spots"
             }
+        ],
+        "modes": [
+            {
+                "type": TwinMode.SINGLE.value,
+                "name": "Single",
+                "description": "Ask one twin for their perspective"
+            },
+            {
+                "type": TwinMode.COUNCIL.value,
+                "name": "Council",
+                "description": "All 4 twins respond to the same question"
+            },
+            {
+                "type": TwinMode.DEBATE.value,
+                "name": "Debate",
+                "description": "Two twins argue different perspectives"
+            },
+            {
+                "type": TwinMode.RELAY.value,
+                "name": "Relay",
+                "description": "Chain through all twins: filter → explore → synthesize → challenge"
+            }
         ]
     }
+
+
+# ==================== Twin Modes ====================
+
+@app.post("/api/brain/{brain_id}/council", response_model=CouncilResponse)
+async def invoke_council(brain_id: str, query: str):
+    """Invoke all 4 twins on the same query (Council mode)."""
+    brain = storage.get(brain_id)
+    if brain:
+        twin_engine.register_brain(brain)
+
+    return twin_engine.invoke_council(brain_id, query)
+
+
+@app.post("/api/brain/{brain_id}/debate", response_model=DebateResponse)
+async def invoke_debate(
+    brain_id: str,
+    query: str,
+    twin_1: str = Query("guardian", enum=["guardian", "scout", "synthesizer", "mirror"]),
+    twin_2: str = Query("mirror", enum=["guardian", "scout", "synthesizer", "mirror"]),
+    rounds: int = Query(3, ge=1, le=5)
+):
+    """Have two twins debate a topic."""
+    if twin_1 == twin_2:
+        raise HTTPException(status_code=400, detail="Twins must be different")
+
+    brain = storage.get(brain_id)
+    if brain:
+        twin_engine.register_brain(brain)
+
+    return twin_engine.invoke_debate(
+        brain_id, query,
+        TwinType(twin_1), TwinType(twin_2),
+        rounds
+    )
+
+
+@app.post("/api/brain/{brain_id}/relay", response_model=RelayResponse)
+async def invoke_relay(brain_id: str, query: str):
+    """Chain through all twins: Guardian → Scout → Synthesizer → Mirror."""
+    brain = storage.get(brain_id)
+    if brain:
+        twin_engine.register_brain(brain)
+
+    return twin_engine.invoke_relay(brain_id, query)
+
+
+@app.get("/api/brain/{brain_id}/twin-history", response_model=TwinHistory)
+async def get_twin_history(brain_id: str):
+    """Get twin conversation history for a brain."""
+    return twin_engine.get_history(brain_id)
 
 
 # ==================== Resonance ====================

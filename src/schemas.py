@@ -29,6 +29,14 @@ class TwinType(str, Enum):
     MIRROR = "mirror"
 
 
+class TwinMode(str, Enum):
+    """Twin interaction modes."""
+    SINGLE = "single"      # One twin responds
+    COUNCIL = "council"    # All 4 twins respond
+    DEBATE = "debate"      # Two twins argue
+    RELAY = "relay"        # Chain: Guardian → Scout → Synthesizer → Mirror
+
+
 class ResonanceLevel(str, Enum):
     """Resonance levels between brains."""
     AWARE = "aware"
@@ -128,6 +136,66 @@ class TwinResponse(BaseModel):
     reasoning: Optional[str] = None
     suggestions: list[str] = []
     resonance_hints: list[str] = []
+
+
+class CouncilResponse(BaseModel):
+    """Response from all 4 twins (Council mode)."""
+    brain_id: str
+    query: str
+    guardian: TwinResponse
+    scout: TwinResponse
+    synthesizer: TwinResponse
+    mirror: TwinResponse
+    synthesis: Optional[str] = None  # Meta-synthesis of all perspectives
+
+
+class DebateTurn(BaseModel):
+    """A single turn in a debate."""
+    twin_type: TwinType
+    response: str
+    responding_to: Optional[str] = None
+
+
+class DebateResponse(BaseModel):
+    """Response from a twin debate."""
+    brain_id: str
+    query: str
+    twin_1: TwinType
+    twin_2: TwinType
+    turns: list[DebateTurn]
+    conclusion: Optional[str] = None
+
+
+class RelayStage(BaseModel):
+    """A stage in the relay chain."""
+    twin_type: TwinType
+    input_context: str
+    response: str
+
+
+class RelayResponse(BaseModel):
+    """Response from relay mode (chained twins)."""
+    brain_id: str
+    query: str
+    stages: list[RelayStage]
+    final_output: str
+
+
+class TwinMemoryEntry(BaseModel):
+    """A single entry in twin conversation history."""
+    timestamp: datetime
+    twin_type: TwinType
+    mode: TwinMode
+    query: str
+    response: str
+    brain_context: Optional[dict] = None
+
+
+class TwinHistory(BaseModel):
+    """Twin conversation history for a brain."""
+    brain_id: str
+    entries: list[TwinMemoryEntry]
+    total_interactions: int
 
 
 # --- Resonance Models ---

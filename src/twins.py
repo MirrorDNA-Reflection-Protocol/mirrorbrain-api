@@ -1,14 +1,23 @@
 """AI Twins — Guardian, Scout, Synthesizer, Mirror.
 
 Powered by Ollama for real AI responses.
+Supports: Single, Council, Debate, and Relay modes.
 """
 
 from __future__ import annotations
 
 import httpx
-from typing import Optional, Dict
+import asyncio
+from datetime import datetime
+from typing import Optional, Dict, List
+from pathlib import Path
+import json
 
-from .schemas import TwinType, TwinRequest, TwinResponse, Brain
+from .schemas import (
+    TwinType, TwinMode, TwinRequest, TwinResponse, Brain,
+    CouncilResponse, DebateResponse, DebateTurn,
+    RelayResponse, RelayStage, TwinMemoryEntry, TwinHistory
+)
 
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -103,11 +112,23 @@ def _call_ollama(system_prompt: str, user_query: str, brain_context: str) -> str
         return f"I'm having trouble connecting right now. ({str(e)[:50]})"
 
 
+MEMORY_PATH = Path("~/.mirrordna/brain/twin_memory").expanduser()
+
+
 class TwinEngine:
-    """Engine for executing AI Twins."""
+    """Engine for executing AI Twins.
+
+    Supports multiple modes:
+    - Single: One twin responds
+    - Council: All 4 twins respond to the same query
+    - Debate: Two twins argue back and forth
+    - Relay: Chain through all twins sequentially
+    """
 
     def __init__(self):
         self._brains: Dict[str, Brain] = {}
+        self._memory: Dict[str, List[TwinMemoryEntry]] = {}
+        MEMORY_PATH.mkdir(parents=True, exist_ok=True)
 
     def register_brain(self, brain: Brain) -> None:
         """Register a brain for twin operations."""
@@ -219,6 +240,249 @@ class TwinEngine:
             reasoning="Reflecting back what you might not see.",
             suggestions=suggestions,
             resonance_hints=hints or ["Mirror active"]
+        )
+
+    # ==================== Council Mode ====================
+
+    def invoke_council(self, brain_id: str, query: str) -> CouncilResponse:
+        """Invoke all 4 twins on the same query (Council mode)."""
+        brain = self.get_brain(brain_id)
+        brain_context = _build_brain_context(brain)
+
+        # Get responses from all twins
+        responses = {}
+        for twin_type in TwinType:
+            request = TwinRequest(brain_id=brain_id, twin_type=twin_type, query=query)
+            responses[twin_type.value] = self.invoke_twin(request)
+
+        # Generate meta-synthesis
+        synthesis = self._synthesize_council(query, responses, brain_context)
+
+        # Store in memory
+        self._store_memory(brain_id, TwinMode.COUNCIL, query, synthesis)
+
+        return CouncilResponse(
+            brain_id=brain_id,
+            query=query,
+            guardian=responses["guardian"],
+            scout=responses["scout"],
+            synthesizer=responses["synthesizer"],
+            mirror=responses["mirror"],
+            synthesis=synthesis
+        )
+
+    def _synthesize_council(self, query: str, responses: Dict[str, TwinResponse], brain_context: str) -> str:
+        """Create a meta-synthesis from all council responses."""
+        council_summary = f"""The Council has spoken on: "{query}"
+
+Guardian says: {responses['guardian'].response}
+Scout says: {responses['scout'].response}
+Synthesizer says: {responses['synthesizer'].response}
+Mirror asks: {responses['mirror'].response}
+
+As a wise counselor, synthesize these 4 perspectives into a unified insight. Be concise (2-3 sentences)."""
+
+        return _call_ollama(council_summary, "", brain_context)
+
+    # ==================== Debate Mode ====================
+
+    def invoke_debate(self, brain_id: str, query: str, twin_1: TwinType, twin_2: TwinType, rounds: int = 3) -> DebateResponse:
+        """Have two twins debate a topic."""
+        brain = self.get_brain(brain_id)
+        brain_context = _build_brain_context(brain)
+
+        turns: List[DebateTurn] = []
+
+        # Initial positions
+        prompt_1 = TWIN_PROMPTS[twin_1]
+        prompt_2 = TWIN_PROMPTS[twin_2]
+
+        # First twin opens
+        response_1 = _call_ollama(
+            f"{prompt_1}\n\nYou're debating with {twin_2.value}. State your perspective.",
+            query,
+            brain_context
+        )
+        turns.append(DebateTurn(twin_type=twin_1, response=response_1, responding_to=None))
+
+        # Debate rounds
+        last_response = response_1
+        for i in range(rounds):
+            # Twin 2 responds
+            response_2 = _call_ollama(
+                f"{prompt_2}\n\nYou're debating with {twin_1.value}. They just said: \"{last_response}\"\n\nRespond with your perspective.",
+                query,
+                brain_context
+            )
+            turns.append(DebateTurn(twin_type=twin_2, response=response_2, responding_to=last_response))
+
+            if i < rounds - 1:  # Twin 1 responds (except last round)
+                response_1 = _call_ollama(
+                    f"{prompt_1}\n\nYou're debating with {twin_2.value}. They just said: \"{response_2}\"\n\nRespond with your perspective.",
+                    query,
+                    brain_context
+                )
+                turns.append(DebateTurn(twin_type=twin_1, response=response_1, responding_to=response_2))
+                last_response = response_1
+
+        # Generate conclusion
+        conclusion = self._conclude_debate(query, turns, brain_context)
+
+        # Store in memory
+        self._store_memory(brain_id, TwinMode.DEBATE, query, conclusion)
+
+        return DebateResponse(
+            brain_id=brain_id,
+            query=query,
+            twin_1=twin_1,
+            twin_2=twin_2,
+            turns=turns,
+            conclusion=conclusion
+        )
+
+    def _conclude_debate(self, query: str, turns: List[DebateTurn], brain_context: str) -> str:
+        """Generate a conclusion from the debate."""
+        debate_summary = "\n".join([f"{t.twin_type.value}: {t.response}" for t in turns])
+
+        conclusion_prompt = f"""A debate just occurred on: "{query}"
+
+{debate_summary}
+
+As a neutral observer, what's the key insight from this debate? Be concise (1-2 sentences)."""
+
+        return _call_ollama(conclusion_prompt, "", brain_context)
+
+    # ==================== Relay Mode ====================
+
+    def invoke_relay(self, brain_id: str, query: str) -> RelayResponse:
+        """Chain through all twins: Guardian filters → Scout explores → Synthesizer frames → Mirror challenges."""
+        brain = self.get_brain(brain_id)
+        brain_context = _build_brain_context(brain)
+
+        stages: List[RelayStage] = []
+        current_context = query
+
+        relay_order = [
+            (TwinType.GUARDIAN, "Filter and assess this for focus alignment"),
+            (TwinType.SCOUT, "Explore opportunities and connections in what the Guardian passed"),
+            (TwinType.SYNTHESIZER, "Build a framework from the Guardian's filter and Scout's exploration"),
+            (TwinType.MIRROR, "Challenge and question the framework. What's missing?"),
+        ]
+
+        for twin_type, role_context in relay_order:
+            prompt = TWIN_PROMPTS[twin_type]
+            relay_prompt = f"{prompt}\n\n{role_context}.\n\nPrevious context: {current_context}"
+
+            response = _call_ollama(relay_prompt, query, brain_context)
+
+            stages.append(RelayStage(
+                twin_type=twin_type,
+                input_context=current_context,
+                response=response
+            ))
+
+            current_context = f"{twin_type.value} said: {response}"
+
+        # Final synthesis
+        final_output = self._synthesize_relay(query, stages, brain_context)
+
+        # Store in memory
+        self._store_memory(brain_id, TwinMode.RELAY, query, final_output)
+
+        return RelayResponse(
+            brain_id=brain_id,
+            query=query,
+            stages=stages,
+            final_output=final_output
+        )
+
+    def _synthesize_relay(self, query: str, stages: List[RelayStage], brain_context: str) -> str:
+        """Create final output from relay chain."""
+        relay_summary = "\n".join([f"{s.twin_type.value}: {s.response}" for s in stages])
+
+        synthesis_prompt = f"""A relay of insights on: "{query}"
+
+{relay_summary}
+
+Distill this into one actionable insight. Be concise (1-2 sentences)."""
+
+        return _call_ollama(synthesis_prompt, "", brain_context)
+
+    # ==================== Memory ====================
+
+    def _store_memory(self, brain_id: str, mode: TwinMode, query: str, response: str) -> None:
+        """Store an interaction in memory."""
+        entry = TwinMemoryEntry(
+            timestamp=datetime.now(),
+            twin_type=TwinType.GUARDIAN,  # Placeholder for multi-twin modes
+            mode=mode,
+            query=query,
+            response=response
+        )
+
+        if brain_id not in self._memory:
+            self._memory[brain_id] = []
+
+        self._memory[brain_id].append(entry)
+
+        # Persist to disk
+        self._save_memory(brain_id)
+
+    def _save_memory(self, brain_id: str) -> None:
+        """Save memory to disk."""
+        if brain_id not in self._memory:
+            return
+
+        memory_file = MEMORY_PATH / f"{brain_id}.json"
+        entries = [
+            {
+                "timestamp": e.timestamp.isoformat(),
+                "twin_type": e.twin_type.value,
+                "mode": e.mode.value,
+                "query": e.query,
+                "response": e.response
+            }
+            for e in self._memory[brain_id]
+        ]
+
+        with open(memory_file, "w") as f:
+            json.dump(entries, f, indent=2)
+
+    def _load_memory(self, brain_id: str) -> List[TwinMemoryEntry]:
+        """Load memory from disk."""
+        memory_file = MEMORY_PATH / f"{brain_id}.json"
+
+        if not memory_file.exists():
+            return []
+
+        try:
+            with open(memory_file) as f:
+                data = json.load(f)
+
+            return [
+                TwinMemoryEntry(
+                    timestamp=datetime.fromisoformat(e["timestamp"]),
+                    twin_type=TwinType(e["twin_type"]),
+                    mode=TwinMode(e["mode"]),
+                    query=e["query"],
+                    response=e["response"]
+                )
+                for e in data
+            ]
+        except Exception:
+            return []
+
+    def get_history(self, brain_id: str) -> TwinHistory:
+        """Get conversation history for a brain."""
+        if brain_id not in self._memory:
+            self._memory[brain_id] = self._load_memory(brain_id)
+
+        entries = self._memory.get(brain_id, [])
+
+        return TwinHistory(
+            brain_id=brain_id,
+            entries=entries,
+            total_interactions=len(entries)
         )
 
 
