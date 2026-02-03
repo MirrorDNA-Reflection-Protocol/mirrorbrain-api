@@ -21,6 +21,7 @@ from .quiz import get_questions, process_quiz, create_brain_from_result, ARCHETY
 from .twins import get_twin_engine
 from .resonance import calculate_resonance
 from .storage import get_storage
+from .consent import get_consent_storage, ConsentProof, ConsentLogRequest, ConsentStats
 
 
 class Settings(BaseSettings):
@@ -58,6 +59,7 @@ app.add_middleware(
 data_path = Path(settings.data_path).expanduser()
 storage = get_storage(data_path)
 twin_engine = get_twin_engine()
+consent_storage = get_consent_storage(data_path / "consent.db")
 
 
 # ==================== Health ====================
@@ -80,6 +82,49 @@ async def health():
         version=settings.version,
         timestamp=datetime.now()
     )
+
+
+# ==================== Consent Logging ====================
+
+@app.post("/consent/log")
+async def log_consent(request: ConsentLogRequest):
+    """Log a consent proof for audit trail."""
+    # Handle both 'hash' and 'proof_hash' field names
+    proof_hash = request.hash or request.proof_hash or "unknown"
+    consent_type = request.type or ("quick" if request.feature else "full")
+
+    proof = ConsentProof(
+        proof_hash=proof_hash,
+        timestamp=request.timestamp,
+        version=request.version,
+        acks=request.acks,
+        page=request.page,
+        fingerprint=request.fingerprint,
+        user_agent=request.user_agent,
+        screen=request.screen,
+        timezone=request.timezone,
+        language=request.language,
+        referrer=request.referrer,
+        consent_type=consent_type,
+        feature=request.feature,
+        logged_at=request.logged_at or datetime.now().isoformat()
+    )
+
+    proof_id = consent_storage.log(proof)
+    return {"success": True, "id": proof_id, "hash": proof_hash}
+
+
+@app.get("/consent/stats", response_model=ConsentStats)
+async def get_consent_stats():
+    """Get consent statistics (admin endpoint)."""
+    return consent_storage.get_stats()
+
+
+@app.get("/consent/lookup/{fingerprint}")
+async def lookup_consent(fingerprint: str):
+    """Look up consent history by fingerprint (admin endpoint)."""
+    proofs = consent_storage.get_by_fingerprint(fingerprint)
+    return {"fingerprint": fingerprint, "proofs": proofs, "count": len(proofs)}
 
 
 # ==================== Quiz ====================
