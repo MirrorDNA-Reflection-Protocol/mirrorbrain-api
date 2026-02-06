@@ -20,6 +20,8 @@ from .schemas import (
 )
 
 
+from .router_client import call_ollama_via_router, audit_append as router_audit
+
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "qwen2.5:7b"
 
@@ -89,27 +91,12 @@ def _build_brain_context(brain: Optional[Brain]) -> str:
 
 
 def _call_ollama(system_prompt: str, user_query: str, brain_context: str) -> str:
-    """Call Ollama API for response."""
-    full_prompt = f"{system_prompt}{brain_context}\n\nUser question: {user_query}"
+    """Call Ollama API via Router (policy + audit).
 
-    try:
-        response = httpx.post(
-            OLLAMA_URL,
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": full_prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.7,
-                    "num_predict": 150,  # Keep responses short
-                }
-            },
-            timeout=30.0
-        )
-        response.raise_for_status()
-        return response.json().get("response", "").strip()
-    except Exception as e:
-        return f"I'm having trouble connecting right now. ({str(e)[:50]})"
+    Routes through MirrorGate Router for governance.
+    Falls back to direct Ollama if Router is unavailable.
+    """
+    return call_ollama_via_router(system_prompt, user_query, brain_context, OLLAMA_MODEL)
 
 
 MEMORY_PATH = Path("~/.mirrordna/brain/twin_memory").expanduser()
@@ -139,7 +126,12 @@ class TwinEngine:
         return self._brains.get(brain_id)
 
     def invoke_twin(self, request: TwinRequest) -> TwinResponse:
-        """Invoke a twin and get a response."""
+        """Invoke a twin and get a response. Audited via Router."""
+        router_audit("twin_invoke_start", {
+            "brain_id": request.brain_id,
+            "twin_type": request.twin_type.value,
+            "query_length": len(request.query),
+        })
         brain = self.get_brain(request.brain_id)
         brain_context = _build_brain_context(brain)
 
