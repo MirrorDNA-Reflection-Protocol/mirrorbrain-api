@@ -92,6 +92,57 @@ def knowledge_search(source: str, query: str, tier: str = "T1") -> list:
         return []
 
 
+def get_analytics(project: Optional[str] = None) -> dict:
+    """Get analytics summary from Router."""
+    try:
+        url = f"{ROUTER_URL}/analytics/summary"
+        if project:
+            url += f"?project={project}"
+        r = httpx.get(url, timeout=10.0)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def score_run(run_id: str, project: str) -> dict:
+    """Score a run for confidence/stability/trust."""
+    try:
+        r = httpx.post(
+            f"{ROUTER_URL}/run/score",
+            json={"run_id": run_id, "project": project},
+            timeout=10.0,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def replay_run(run_id: str, project: str, policy_override: Optional[dict] = None) -> dict:
+    """Replay a historical run in sandbox mode."""
+    try:
+        r = httpx.post(
+            f"{ROUTER_URL}/replay/run",
+            json={"run_id": run_id, "project": project, "policy_override": policy_override},
+            timeout=15.0,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_health() -> dict:
+    """Get Router health including kill switch and policy version."""
+    try:
+        r = httpx.get(f"{ROUTER_URL}/health", timeout=3.0)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": str(e), "status": "unreachable"}
+
+
 def call_ollama_via_router(system_prompt: str, user_query: str, brain_context: str, model: str = "qwen2.5:7b") -> str:
     """Call Ollama, routing through Router for audit + policy.
 
